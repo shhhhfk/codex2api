@@ -619,7 +619,7 @@ func (db *DB) GetTrafficSnapshot(ctx context.Context) (*TrafficSnapshot, error) 
 
 // ListRecentUsageLogs 获取最近的请求日志
 func (db *DB) ListRecentUsageLogs(ctx context.Context, limit int) ([]*UsageLog, error) {
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 || limit > 5000 {
 		limit = 50
 	}
 	query := `SELECT u.id, u.account_id, u.endpoint, u.model, u.prompt_tokens, u.completion_tokens, u.total_tokens, u.status_code, u.duration_ms,

@@ -247,7 +247,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		"temperature", "top_p", "frequency_penalty", "presence_penalty",
 		"logprobs", "top_logprobs", "n", "seed", "stop", "user",
 		"logit_bias", "response_format", "service_tier", "stream_options",
-		"reasoning_effort",
+		"reasoning_effort", "truncation", "context_management",
 	}
 	for _, field := range unsupportedFields {
 		codexBody, _ = sjson.DeleteBytes(codexBody, field)
