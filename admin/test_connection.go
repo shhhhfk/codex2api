@@ -90,6 +90,8 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		return
 	}
 
+	proxy.ParseCodexUsageHeaders(resp, account)
+
 	// 解析 SSE 流
 	hasContent := false
 	_ = proxy.ReadSSEStream(resp.Body, func(data []byte) bool {
@@ -218,6 +220,7 @@ func (h *Handler) BatchTest(c *gin.Context) {
 
 			switch resp.StatusCode {
 			case http.StatusOK:
+				proxy.ParseCodexUsageHeaders(resp, acc)
 				h.store.ClearCooldown(acc)
 				atomic.AddInt64(&successCount, 1)
 			case http.StatusUnauthorized:

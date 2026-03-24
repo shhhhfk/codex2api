@@ -776,6 +776,11 @@ func parseCodexUsageHeaders(resp *http.Response, account *auth.Account) {
 	}
 }
 
+// ParseCodexUsageHeaders 从响应头提取并更新账号用量信息
+func ParseCodexUsageHeaders(resp *http.Response, account *auth.Account) {
+	parseCodexUsageHeaders(resp, account)
+}
+
 func parseFloat(s string) float64 {
 	if s == "" {
 		return 0

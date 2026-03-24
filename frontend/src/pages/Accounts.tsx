@@ -335,7 +335,12 @@ export default function Accounts() {
                         </TableCell>
                         <TableCell className="text-[14px] font-mono text-muted-foreground">{account.id}</TableCell>
                         <TableCell className="text-[14px] text-muted-foreground">{account.email || '-'}</TableCell>
-                        <TableCell className="text-[14px] font-mono">{account.plan_type || '-'}</TableCell>
+                        <TableCell
+                          className="text-[18px] font-medium"
+                          style={{ fontFamily: 'var(--font-geist-mono)' }}
+                        >
+                          {account.plan_type || '-'}
+                        </TableCell>
                         <TableCell><StatusBadge status={account.status} /></TableCell>
                         <TableCell>
                           <div className="flex items-center gap-2 text-[13px]">
@@ -345,7 +350,7 @@ export default function Accounts() {
                           </div>
                         </TableCell>
                         <TableCell>
-                          {(account.plan_type?.toLowerCase() === 'free' && (account.usage_percent_7d ?? 0) > 0) ? (
+                          {account.plan_type?.toLowerCase() === 'free' ? (
                             <div className="w-24">
                               <div className="flex items-center justify-between mb-1">
                                 <span className="text-[12px] font-medium">{(account.usage_percent_7d ?? 0).toFixed(1)}%</span>
