@@ -14,6 +14,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import {
   Table,
   TableBody,
@@ -280,15 +281,11 @@ export default function Settings() {
               </div>
               <div>
                 <label className="block mb-2 text-sm font-semibold text-muted-foreground">测试连接模型</label>
-                <select
-                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                <Select
                   value={settingsForm.test_model}
-                  onChange={(e: ChangeEvent<HTMLSelectElement>) => setSettingsForm(f => ({ ...f, test_model: e.target.value }))}
-                >
-                  {modelList.map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
-                </select>
+                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, test_model: value }))}
+                  options={modelList.map((model) => ({ label: model, value: model }))}
+                />
                 <p className="text-xs text-muted-foreground mt-1">账号测试连接时使用的模型</p>
               </div>
               <div>
