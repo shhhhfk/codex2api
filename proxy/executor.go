@@ -21,21 +21,56 @@ import (
 
 // ==================== HTTP 连接池 ====================
 
-// 全局连接池：按 proxyURL 分组缓存 *http.Client
-// 避免每个请求新建 TCP/TLS 连接
-var clientPool sync.Map // map[string]*http.Client, key = proxyURL (空串代表直连)
+// 全局连接池：按账号维度缓存 *http.Client
+// 避免同一代理下的多个账号共用同一条 HTTP/2 连接，降低 GOAWAY 连带影响范围。
+var clientPool sync.Map // map[string]*http.Client, key = account-scoped pool key
+
+func clientPoolKey(account *auth.Account, proxyURL string) string {
+	return fmt.Sprintf("%d|%s", account.ID(), proxyURL)
+}
+
+func shouldRecyclePooledClient(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "goaway") ||
+		strings.Contains(msg, "enhance_your_calm") ||
+		strings.Contains(msg, "too_many_pings") ||
+		strings.Contains(msg, "connection is shutting down")
+}
+
+func recyclePooledClient(account *auth.Account, proxyURL string) {
+	key := clientPoolKey(account, proxyURL)
+	if v, ok := clientPool.LoadAndDelete(key); ok {
+		v.(*http.Client).CloseIdleConnections()
+	}
+}
+
+func recyclePooledClientForAccount(account *auth.Account) {
+	if account == nil {
+		return
+	}
+
+	account.Mu().RLock()
+	proxyURL := account.ProxyURL
+	account.Mu().RUnlock()
+	recyclePooledClient(account, proxyURL)
+}
 
 // getPooledClient 获取或创建连接池中的 HTTP Client
-func getPooledClient(proxyURL string) *http.Client {
-	if v, ok := clientPool.Load(proxyURL); ok {
+func getPooledClient(account *auth.Account, proxyURL string) *http.Client {
+	key := clientPoolKey(account, proxyURL)
+	if v, ok := clientPool.Load(key); ok {
 		return v.(*http.Client)
 	}
 
 	transport := &http.Transport{
 		// 连接池配置
-		MaxIdleConns:        400,              // 全局最大空闲连接
-		MaxIdleConnsPerHost: 200,              // 每个 Host 最大空闲连接（chatgpt.com 只有 1 个 host）
-		MaxConnsPerHost:     400,              // 每个 Host 最大并发连接
+		MaxIdleConns:        32,               // 账号级别池不需要过大的空闲连接
+		MaxIdleConnsPerHost: 16,               // 单账号最多只需维持少量空闲连接
+		MaxConnsPerHost:     16,               // 降低单连接池过热概率
 		IdleConnTimeout:     90 * time.Second, // 空闲连接超时
 		TLSHandshakeTimeout: 10 * time.Second, // TLS 握手超时
 		// Keep-Alive
@@ -62,8 +97,8 @@ func getPooledClient(proxyURL string) *http.Client {
 		Timeout: 0,
 	}
 
-	// CAS 存储，确保相同 proxyURL 只创建一个 Client
-	if v, loaded := clientPool.LoadOrStore(proxyURL, client); loaded {
+	// CAS 存储，确保相同账号池只创建一个 Client
+	if v, loaded := clientPool.LoadOrStore(key, client); loaded {
 		return v.(*http.Client)
 	}
 	return client
@@ -143,11 +178,14 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		req.Header.Set("Conversation_id", cacheKey)
 	}
 
-	// 获取连接池 HTTP 客户端（复用 TCP/TLS 连接）
-	client := getPooledClient(proxyURL)
+	// 获取连接池 HTTP 客户端（账号级隔离，复用 TCP/TLS 连接）
+	client := getPooledClient(account, proxyURL)
 
 	resp, err := client.Do(req)
 	if err != nil {
+		if shouldRecyclePooledClient(err) {
+			recyclePooledClient(account, proxyURL)
+		}
 		return nil, fmt.Errorf("请求上游失败: %w", err)
 	}
 

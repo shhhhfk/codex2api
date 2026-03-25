@@ -191,6 +191,19 @@ func classifyStreamOutcome(ctxErr, readErr, writeErr error, gotTerminal bool) st
 	}
 }
 
+func shouldTransparentRetryStream(outcome streamOutcome, attempt int, wroteAnyBody bool, ctxErr, writeErr error) bool {
+	if attempt >= maxRetries {
+		return false
+	}
+	if !outcome.penalize {
+		return false
+	}
+	if wroteAnyBody || ctxErr != nil || writeErr != nil {
+		return false
+	}
+	return true
+}
+
 // RegisterRoutes 注册路由
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	v1 := r.Group("/v1")
@@ -384,6 +397,8 @@ func (h *Handler) Responses(c *gin.Context) {
 		deltaCharCount := 0  // 累计 delta 字符数（用于断流时估算 token）
 		var readErr error
 		var writeErr error
+		wroteAnyBody := false
+		var responseJSON []byte
 
 		if isStream {
 			// 流式透传 + TTFT 跟踪
@@ -429,6 +444,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					writeErr = err
 					return false
 				}
+				wroteAnyBody = true
 				flusher.Flush()
 				return eventType != "response.completed" && eventType != "response.failed"
 			})
@@ -462,22 +478,29 @@ func (h *Handler) Responses(c *gin.Context) {
 			if lastResponseData != nil {
 				responseObj := gjson.GetBytes(lastResponseData, "response")
 				if responseObj.Exists() {
-					c.Data(http.StatusOK, "application/json", []byte(responseObj.Raw))
-				} else {
-					c.JSON(http.StatusBadGateway, gin.H{
-						"error": gin.H{"message": "未收到完整的上游响应", "type": "upstream_error"},
-					})
+					responseJSON = []byte(responseObj.Raw)
 				}
-			} else {
-				c.JSON(http.StatusBadGateway, gin.H{
-					"error": gin.H{"message": "未收到完整的上游响应", "type": "upstream_error"},
-				})
 			}
 		}
 
 		// 断流检测 + token 估算
 		totalDuration := int(time.Since(start).Milliseconds())
 		outcome := classifyStreamOutcome(c.Request.Context().Err(), readErr, writeErr, gotTerminal)
+		if shouldTransparentRetryStream(outcome, attempt, wroteAnyBody, c.Request.Context().Err(), writeErr) {
+			log.Printf("上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, /v1/responses): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
+			recyclePooledClientForAccount(account)
+			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
+				h.store.PersistUsageSnapshot(account, usagePct)
+			}
+			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+			resp.Body.Close()
+			h.store.Release(account)
+			lastErr = readErr
+			if lastErr == nil {
+				lastErr = errors.New(outcome.failureMessage)
+			}
+			continue
+		}
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
 			log.Printf("流异常结束 (account %d, /v1/responses, status %d): %s，已转发约 %d 字符", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount)
@@ -491,6 +514,15 @@ func (h *Handler) Responses(c *gin.Context) {
 					CompletionTokens: estOutputTokens,
 					TotalTokens:      estOutputTokens,
 				}
+			}
+		}
+		if !isStream {
+			if responseJSON != nil {
+				c.Data(http.StatusOK, "application/json", responseJSON)
+			} else {
+				c.JSON(http.StatusBadGateway, gin.H{
+					"error": gin.H{"message": "未收到完整的上游响应", "type": "upstream_error"},
+				})
 			}
 		}
 
@@ -522,6 +554,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			h.store.PersistUsageSnapshot(account, usagePct)
 		}
 		if outcome.penalize {
+			recyclePooledClientForAccount(account)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 		} else if outcome.logStatusCode == http.StatusOK {
 			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
@@ -643,6 +676,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		deltaCharCount := 0  // 累计 delta 字符数（用于断流时估算 token）
 		var readErr error
 		var writeErr error
+		wroteAnyBody := false
+		var compactResult []byte
 
 		chunkID := "chatcmpl-" + uuid.New().String()[:8]
 		created := time.Now().Unix()
@@ -689,6 +724,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 						writeErr = err
 						return false
 					}
+					wroteAnyBody = true
 					flusher.Flush()
 				}
 				if done {
@@ -696,6 +732,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 						writeErr = err
 						return false
 					}
+					wroteAnyBody = true
 					flusher.Flush()
 					return false
 				}
@@ -741,12 +778,27 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				result, _ = sjson.SetBytes(result, "usage.total_tokens", usage.TotalTokens)
 			}
 
-			c.Data(http.StatusOK, "application/json", result)
+			compactResult = result
 		}
 
 		// 断流检测 + token 估算
 		totalDuration := int(time.Since(start).Milliseconds())
 		outcome := classifyStreamOutcome(c.Request.Context().Err(), readErr, writeErr, gotTerminal)
+		if shouldTransparentRetryStream(outcome, attempt, wroteAnyBody, c.Request.Context().Err(), writeErr) {
+			log.Printf("上游流在首包前断开，重置连接并重试 (attempt %d/%d, account %d, /v1/chat/completions): %s", attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
+			recyclePooledClientForAccount(account)
+			if usagePct, ok := parseCodexUsageHeaders(resp, account); ok {
+				h.store.PersistUsageSnapshot(account, usagePct)
+			}
+			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
+			resp.Body.Close()
+			h.store.Release(account)
+			lastErr = readErr
+			if lastErr == nil {
+				lastErr = errors.New(outcome.failureMessage)
+			}
+			continue
+		}
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
 			log.Printf("流异常结束 (account %d, /v1/chat/completions, status %d): %s，已转发约 %d 字符", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount)
@@ -760,6 +812,15 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					CompletionTokens: estOutputTokens,
 					TotalTokens:      estOutputTokens,
 				}
+			}
+		}
+		if !isStream {
+			if compactResult != nil {
+				c.Data(http.StatusOK, "application/json", compactResult)
+			} else {
+				c.JSON(http.StatusBadGateway, gin.H{
+					"error": gin.H{"message": "未收到完整的上游响应", "type": "upstream_error"},
+				})
 			}
 		}
 
@@ -791,6 +852,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			h.store.PersistUsageSnapshot(account, usagePct)
 		}
 		if outcome.penalize {
+			recyclePooledClientForAccount(account)
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 		} else if outcome.logStatusCode == http.StatusOK {
 			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)

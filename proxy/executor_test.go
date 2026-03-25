@@ -81,3 +81,57 @@ func TestClassifyStreamOutcome(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldRecyclePooledClient(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "goaway calm",
+			err:  errors.New(`http2: server sent GOAWAY and closed the connection; ErrCode=ENHANCE_YOUR_CALM`),
+			want: true,
+		},
+		{
+			name: "connection shutting down",
+			err:  errors.New("http2: client connection is shutting down"),
+			want: true,
+		},
+		{
+			name: "plain timeout",
+			err:  errors.New("read timeout"),
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldRecyclePooledClient(tc.err); got != tc.want {
+				t.Fatalf("shouldRecyclePooledClient() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldTransparentRetryStream(t *testing.T) {
+	retryable := streamOutcome{
+		logStatusCode:  logStatusUpstreamStreamBreak,
+		failureKind:    "transport",
+		failureMessage: "upstream failed before first byte",
+		penalize:       true,
+	}
+
+	if !shouldTransparentRetryStream(retryable, 0, false, nil, nil) {
+		t.Fatal("expected early upstream failure to be transparently retried")
+	}
+	if shouldTransparentRetryStream(retryable, maxRetries, false, nil, nil) {
+		t.Fatal("expected retry to stop at maxRetries")
+	}
+	if shouldTransparentRetryStream(retryable, 0, true, nil, nil) {
+		t.Fatal("expected retry to stop after downstream already received bytes")
+	}
+	if shouldTransparentRetryStream(retryable, 0, false, context.Canceled, nil) {
+		t.Fatal("expected retry to stop when downstream context is canceled")
+	}
+}
