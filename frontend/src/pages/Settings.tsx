@@ -50,6 +50,7 @@ export default function Settings() {
     auto_clean_rate_limited: false,
     admin_secret: '',
     auto_clean_full_usage: false,
+    proxy_pool_enabled: false,
   })
   const [savingSettings, setSavingSettings] = useState(false)
   const [modelList, setModelList] = useState<string[]>([])

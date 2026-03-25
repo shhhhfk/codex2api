@@ -287,7 +287,7 @@ export default function DashboardUsageCharts({
                   labelStyle={tooltipLabelStyle}
                   itemStyle={tooltipItemStyle}
                 />
-                <Legend wrapperStyle={{ paddingTop: 12, fontSize: 12 }} />
+                <Legend wrapperStyle={{ paddingTop: 12, fontSize: 12, color: axisColor }} />
                 <Bar dataKey="inputTokens" stackId="tokens" name={t('dashboard.seriesInputTokens')} fill="hsl(var(--info))" radius={[0, 0, 4, 4]} />
                 <Bar dataKey="outputTokens" stackId="tokens" name={t('dashboard.seriesOutputTokens')} fill="hsl(var(--success))" minPointSize={4} />
                 <Bar dataKey="reasoningTokens" stackId="tokens" name={t('dashboard.seriesReasoningTokens')} fill="hsl(36 90% 55%)" minPointSize={4} />

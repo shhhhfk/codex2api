@@ -58,7 +58,7 @@
     --color-secondary: hsl(220 12% 22%);
     --color-secondary-foreground: hsl(220 14% 78%);
     --color-muted: hsl(220 12% 22%);
-    --color-muted-foreground: hsl(220 10% 54%);
+    --color-muted-foreground: hsl(220 10% 62%);
     --color-accent: hsl(220 12% 22%);
     --color-accent-foreground: hsl(220 14% 86%);
     --color-destructive: hsl(0 65% 54%);
@@ -71,8 +71,8 @@
     --success-bg: 152 55% 46% / 0.14;
     --warning: 36 80% 50%;
     --warning-bg: 36 80% 50% / 0.14;
-    --info: 220 50% 62%;
-    --info-bg: 220 50% 62% / 0.14;
+    --info: 220 55% 70%;
+    --info-bg: 220 55% 70% / 0.14;
     --sidebar-background: 220 13% 10%;
   }
 

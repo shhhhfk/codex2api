@@ -390,6 +390,10 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 
 		// 成功！透传响应并跟踪 TTFT / usage
+		account.Mu().RLock()
+		c.Set("x-account-email", account.Email)
+		c.Set("x-account-proxy", account.ProxyURL)
+		account.Mu().RUnlock()
 		var firstTokenMs int
 		var usage *UsageInfo
 		ttftRecorded := false
@@ -669,6 +673,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		}
 
 		// 成功！翻译响应 + TTFT 跟踪
+		account.Mu().RLock()
+		c.Set("x-account-email", account.Email)
+		c.Set("x-account-proxy", account.ProxyURL)
+		account.Mu().RUnlock()
 		var firstTokenMs int
 		var usage *UsageInfo
 		ttftRecorded := false

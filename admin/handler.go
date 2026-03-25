@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 // Handler 管理后台 API 处理器
@@ -86,6 +88,12 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/settings", h.GetSettings)
 	api.PUT("/settings", h.UpdateSettings)
 	api.GET("/models", h.ListModels)
+	api.GET("/proxies", h.ListProxies)
+	api.POST("/proxies", h.AddProxies)
+	api.DELETE("/proxies/:id", h.DeleteProxy)
+	api.PATCH("/proxies/:id", h.UpdateProxy)
+	api.POST("/proxies/batch-delete", h.BatchDeleteProxies)
+	api.POST("/proxies/test", h.TestProxy)
 }
 
 // adminAuthMiddleware 管理接口鉴权中间件
@@ -792,6 +800,7 @@ type settingsResponse struct {
 	AutoCleanRateLimited  bool   `json:"auto_clean_rate_limited"`
 	AdminSecret           string `json:"admin_secret"`
 	AutoCleanFullUsage    bool   `json:"auto_clean_full_usage"`
+	ProxyPoolEnabled      bool   `json:"proxy_pool_enabled"`
 }
 
 type updateSettingsReq struct {
@@ -806,6 +815,7 @@ type updateSettingsReq struct {
 	AutoCleanRateLimited  *bool   `json:"auto_clean_rate_limited"`
 	AdminSecret           *string `json:"admin_secret"`
 	AutoCleanFullUsage    *bool   `json:"auto_clean_full_usage"`
+	ProxyPoolEnabled      *bool   `json:"proxy_pool_enabled"`
 }
 
 // GetSettings 获取当前系统设置
@@ -829,6 +839,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		AutoCleanRateLimited:  h.store.GetAutoCleanRateLimited(),
 		AdminSecret:           adminSecret,
 		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
+		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
 	})
 }
 
@@ -924,6 +935,14 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: auto_clean_full_usage = %t", *req.AutoCleanFullUsage)
 	}
 
+	if req.ProxyPoolEnabled != nil {
+		h.store.SetProxyPoolEnabled(*req.ProxyPoolEnabled)
+		if *req.ProxyPoolEnabled {
+			_ = h.store.ReloadProxyPool()
+		}
+		log.Printf("设置已更新: proxy_pool_enabled = %t", *req.ProxyPoolEnabled)
+	}
+
 	// 读取当前 admin_secret（如有更新则使用新值）
 	currentAdminSecret := ""
 	if dbSettings, err := h.db.GetSystemSettings(c.Request.Context()); err == nil && dbSettings != nil {
@@ -947,6 +966,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanRateLimited:  h.store.GetAutoCleanRateLimited(),
 		AdminSecret:           currentAdminSecret,
 		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
+		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
@@ -968,6 +988,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanRateLimited:  h.store.GetAutoCleanRateLimited(),
 		AdminSecret:           currentAdminSecret,
 		AutoCleanFullUsage:    h.store.GetAutoCleanFullUsage(),
+		ProxyPoolEnabled:      h.store.GetProxyPoolEnabled(),
 	})
 }
 
@@ -998,4 +1019,198 @@ func (h *Handler) cleanByStatus(c *gin.Context, targetStatus string) {
 	cleaned := h.store.CleanByRuntimeStatus(ctx, targetStatus)
 
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("已清理 %d 个账号", cleaned), "cleaned": cleaned})
+}
+
+// ==================== Proxies ====================
+
+// ListProxies 获取代理列表
+func (h *Handler) ListProxies(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	proxies, err := h.db.ListProxies(ctx)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "获取代理列表失败")
+		return
+	}
+	if proxies == nil {
+		proxies = []*database.ProxyRow{}
+	}
+	c.JSON(http.StatusOK, gin.H{"proxies": proxies})
+}
+
+// AddProxies 添加代理（支持批量）
+func (h *Handler) AddProxies(c *gin.Context) {
+	var req struct {
+		URLs  []string `json:"urls"`
+		URL   string   `json:"url"`
+		Label string   `json:"label"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+
+	// 合并单条和批量
+	urls := req.URLs
+	if req.URL != "" {
+		urls = append(urls, req.URL)
+	}
+	if len(urls) == 0 {
+		writeError(c, http.StatusBadRequest, "请提供至少一个代理 URL")
+		return
+	}
+
+	// 过滤空行
+	cleaned := make([]string, 0, len(urls))
+	for _, u := range urls {
+		u = strings.TrimSpace(u)
+		if u != "" {
+			cleaned = append(cleaned, u)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	inserted, err := h.db.InsertProxies(ctx, cleaned, req.Label)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "添加代理失败")
+		return
+	}
+
+	// 刷新代理池
+	_ = h.store.ReloadProxyPool()
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  fmt.Sprintf("成功添加 %d 个代理", inserted),
+		"inserted": inserted,
+		"total":    len(cleaned),
+	})
+}
+
+// DeleteProxy 删除单个代理
+func (h *Handler) DeleteProxy(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "无效的代理 ID")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := h.db.DeleteProxy(ctx, id); err != nil {
+		writeError(c, http.StatusInternalServerError, "删除代理失败")
+		return
+	}
+
+	_ = h.store.ReloadProxyPool()
+	c.JSON(http.StatusOK, gin.H{"message": "代理已删除"})
+}
+
+// UpdateProxy 更新代理（启用/禁用/改标签）
+func (h *Handler) UpdateProxy(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "无效的代理 ID")
+		return
+	}
+
+	var req struct {
+		Label   *string `json:"label"`
+		Enabled *bool   `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := h.db.UpdateProxy(ctx, id, req.Label, req.Enabled); err != nil {
+		writeError(c, http.StatusInternalServerError, "更新代理失败")
+		return
+	}
+
+	_ = h.store.ReloadProxyPool()
+	c.JSON(http.StatusOK, gin.H{"message": "代理已更新"})
+}
+
+// BatchDeleteProxies 批量删除代理
+func (h *Handler) BatchDeleteProxies(c *gin.Context) {
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || len(req.IDs) == 0 {
+		writeError(c, http.StatusBadRequest, "请提供要删除的代理 ID 列表")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	deleted, err := h.db.DeleteProxies(ctx, req.IDs)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "批量删除失败")
+		return
+	}
+
+	_ = h.store.ReloadProxyPool()
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("已删除 %d 个代理", deleted), "deleted": deleted})
+}
+
+// TestProxy 测试代理连通性与出口 IP 位置
+func (h *Handler) TestProxy(c *gin.Context) {
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.URL == "" {
+		writeError(c, http.StatusBadRequest, "请提供代理 URL")
+		return
+	}
+
+	// 创建使用指定代理的 HTTP client
+	transport := &http.Transport{}
+	proxyURL, err := parseProxyURL(req.URL)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "error": fmt.Sprintf("代理 URL 格式错误: %v", err)})
+		return
+	}
+	transport.Proxy = http.ProxyURL(proxyURL)
+	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
+
+	start := time.Now()
+	resp, err := client.Get("http://ip-api.com/json/?lang=zh-CN&fields=status,message,country,regionName,city,isp,query")
+	latencyMs := time.Since(start).Milliseconds()
+
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "error": fmt.Sprintf("连接失败: %v", err), "latency_ms": latencyMs})
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	result := gjson.ParseBytes(body)
+
+	if result.Get("status").String() != "success" {
+		c.JSON(http.StatusOK, gin.H{"success": false, "error": result.Get("message").String(), "latency_ms": latencyMs})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":    true,
+		"ip":         result.Get("query").String(),
+		"country":    result.Get("country").String(),
+		"region":     result.Get("regionName").String(),
+		"city":       result.Get("city").String(),
+		"isp":        result.Get("isp").String(),
+		"latency_ms": latencyMs,
+	})
+}
+
+// parseProxyURL 解析代理 URL
+func parseProxyURL(rawURL string) (*neturl.URL, error) {
+	return neturl.Parse(rawURL)
 }

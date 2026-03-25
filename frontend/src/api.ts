@@ -128,4 +128,36 @@ export const api = {
     request<{ message: string; cleaned: number }>('/accounts/clean-banned', { method: 'POST' }),
   cleanRateLimited: () =>
     request<{ message: string; cleaned: number }>('/accounts/clean-rate-limited', { method: 'POST' }),
+  // Proxies
+  listProxies: () =>
+    request<{ proxies: ProxyRow[] }>('/proxies'),
+  addProxies: (data: { urls?: string[]; url?: string; label?: string }) =>
+    request<{ message: string; inserted: number; total: number }>('/proxies', { method: 'POST', body: JSON.stringify(data) }),
+  deleteProxy: (id: number) =>
+    request<MessageResponse>(`/proxies/${id}`, { method: 'DELETE' }),
+  updateProxy: (id: number, data: { label?: string; enabled?: boolean }) =>
+    request<MessageResponse>(`/proxies/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  batchDeleteProxies: (ids: number[]) =>
+    request<{ message: string; deleted: number }>('/proxies/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
+  testProxy: (url: string) =>
+    request<ProxyTestResult>('/proxies/test', { method: 'POST', body: JSON.stringify({ url }) }),
+}
+
+export interface ProxyRow {
+  id: number
+  url: string
+  label: string
+  enabled: boolean
+  created_at: string
+}
+
+export interface ProxyTestResult {
+  success: boolean
+  ip?: string
+  country?: string
+  region?: string
+  city?: string
+  isp?: string
+  latency_ms?: number
+  error?: string
 }

@@ -139,6 +139,7 @@ export interface SystemSettings {
   auto_clean_rate_limited: boolean
   admin_secret: string
   auto_clean_full_usage: boolean
+  proxy_pool_enabled: boolean
 }
 
 export interface UsageStats {

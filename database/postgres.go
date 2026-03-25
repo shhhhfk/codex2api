@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -230,6 +231,15 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_rate_limited BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS admin_secret VARCHAR(255) DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_full_usage BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS proxy_pool_enabled BOOLEAN DEFAULT FALSE;
+
+	CREATE TABLE IF NOT EXISTS proxies (
+		id         SERIAL PRIMARY KEY,
+		url        VARCHAR(500) NOT NULL UNIQUE,
+		label      VARCHAR(255) DEFAULT '',
+		enabled    BOOLEAN DEFAULT TRUE,
+		created_at TIMESTAMP DEFAULT NOW()
+	);
 	`
 	_, err := db.conn.ExecContext(ctx, query)
 	return err
@@ -287,6 +297,7 @@ type SystemSettings struct {
 	AutoCleanRateLimited  bool
 	AdminSecret           string
 	AutoCleanFullUsage    bool
+	ProxyPoolEnabled      bool
 }
 
 // GetSystemSettings 加载全局设置
@@ -294,11 +305,13 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	s := &SystemSettings{}
 	err := db.conn.QueryRowContext(ctx, `
 		SELECT max_concurrency, global_rpm, test_model, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
-		       auto_clean_unauthorized, auto_clean_rate_limited, COALESCE(admin_secret, ''), COALESCE(auto_clean_full_usage, false)
+		       auto_clean_unauthorized, auto_clean_rate_limited, COALESCE(admin_secret, ''), COALESCE(auto_clean_full_usage, false),
+		       COALESCE(proxy_pool_enabled, false)
 		FROM system_settings WHERE id = 1
 	`).Scan(
 		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,
 		&s.AutoCleanUnauthorized, &s.AutoCleanRateLimited, &s.AdminSecret, &s.AutoCleanFullUsage,
+		&s.ProxyPoolEnabled,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -311,9 +324,9 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 	_, err := db.conn.ExecContext(ctx, `
 		INSERT INTO system_settings (
 			id, max_concurrency, global_rpm, test_model, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
-			auto_clean_unauthorized, auto_clean_rate_limited, admin_secret, auto_clean_full_usage
+			auto_clean_unauthorized, auto_clean_rate_limited, admin_secret, auto_clean_full_usage, proxy_pool_enabled
 		)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (id) DO UPDATE SET
 			max_concurrency         = EXCLUDED.max_concurrency,
 			global_rpm              = EXCLUDED.global_rpm,
@@ -325,8 +338,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 			auto_clean_unauthorized = EXCLUDED.auto_clean_unauthorized,
 			auto_clean_rate_limited = EXCLUDED.auto_clean_rate_limited,
 			admin_secret            = EXCLUDED.admin_secret,
-			auto_clean_full_usage   = EXCLUDED.auto_clean_full_usage
-	`, s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize, s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage)
+			auto_clean_full_usage   = EXCLUDED.auto_clean_full_usage,
+			proxy_pool_enabled      = EXCLUDED.proxy_pool_enabled
+	`, s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
+		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled)
 	return err
 }
 
@@ -353,6 +368,119 @@ func (db *DB) GetAllAPIKeyValues(ctx context.Context) ([]string, error) {
 		keys = append(keys, k)
 	}
 	return keys, rows.Err()
+}
+
+// ==================== Proxies ====================
+
+// ProxyRow 代理行
+type ProxyRow struct {
+	ID        int64     `json:"id"`
+	URL       string    `json:"url"`
+	Label     string    `json:"label"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ListProxies 获取所有代理
+func (db *DB) ListProxies(ctx context.Context) ([]*ProxyRow, error) {
+	rows, err := db.conn.QueryContext(ctx, `SELECT id, url, label, enabled, created_at FROM proxies ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var proxies []*ProxyRow
+	for rows.Next() {
+		p := &ProxyRow{}
+		if err := rows.Scan(&p.ID, &p.URL, &p.Label, &p.Enabled, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		proxies = append(proxies, p)
+	}
+	return proxies, rows.Err()
+}
+
+// ListEnabledProxies 获取已启用的代理
+func (db *DB) ListEnabledProxies(ctx context.Context) ([]*ProxyRow, error) {
+	rows, err := db.conn.QueryContext(ctx, `SELECT id, url, label, enabled, created_at FROM proxies WHERE enabled = true ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var proxies []*ProxyRow
+	for rows.Next() {
+		p := &ProxyRow{}
+		if err := rows.Scan(&p.ID, &p.URL, &p.Label, &p.Enabled, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		proxies = append(proxies, p)
+	}
+	return proxies, rows.Err()
+}
+
+// InsertProxy 插入单个代理
+func (db *DB) InsertProxy(ctx context.Context, url, label string) (int64, error) {
+	var id int64
+	err := db.conn.QueryRowContext(ctx,
+		`INSERT INTO proxies (url, label) VALUES ($1, $2) ON CONFLICT (url) DO NOTHING RETURNING id`, url, label).Scan(&id)
+	return id, err
+}
+
+// InsertProxies 批量插入代理（跳过已存在的）
+func (db *DB) InsertProxies(ctx context.Context, urls []string, label string) (int, error) {
+	inserted := 0
+	for _, u := range urls {
+		var id int64
+		err := db.conn.QueryRowContext(ctx,
+			`INSERT INTO proxies (url, label) VALUES ($1, $2) ON CONFLICT (url) DO NOTHING RETURNING id`, u, label).Scan(&id)
+		if err == nil {
+			inserted++
+		}
+	}
+	return inserted, nil
+}
+
+// DeleteProxy 删除单个代理
+func (db *DB) DeleteProxy(ctx context.Context, id int64) error {
+	_, err := db.conn.ExecContext(ctx, `DELETE FROM proxies WHERE id = $1`, id)
+	return err
+}
+
+// DeleteProxies 批量删除代理
+func (db *DB) DeleteProxies(ctx context.Context, ids []int64) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	// 构建 IN 子句
+	args := make([]interface{}, len(ids))
+	placeholders := make([]string, len(ids))
+	for i, id := range ids {
+		args[i] = id
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	}
+	query := fmt.Sprintf("DELETE FROM proxies WHERE id IN (%s)", strings.Join(placeholders, ","))
+	res, err := db.conn.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	affected, _ := res.RowsAffected()
+	return int(affected), nil
+}
+
+// UpdateProxy 更新代理
+func (db *DB) UpdateProxy(ctx context.Context, id int64, label *string, enabled *bool) error {
+	if label != nil {
+		if _, err := db.conn.ExecContext(ctx, `UPDATE proxies SET label = $1 WHERE id = $2`, *label, id); err != nil {
+			return err
+		}
+	}
+	if enabled != nil {
+		if _, err := db.conn.ExecContext(ctx, `UPDATE proxies SET enabled = $1 WHERE id = $2`, *enabled, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ==================== Usage Logs（批量写入） ====================

@@ -1,0 +1,335 @@
+import { useState, useEffect, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
+import { Globe, Plus, Trash2, TestTube, ToggleLeft, ToggleRight, MapPin, Loader2 } from 'lucide-react'
+import { Card, CardContent } from '@/components/ui/card'
+import { api, type ProxyRow, type ProxyTestResult } from '../api'
+
+export default function Proxies() {
+  const { t } = useTranslation()
+  const [proxies, setProxies] = useState<ProxyRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [poolEnabled, setPoolEnabled] = useState(false)
+  const [showAdd, setShowAdd] = useState(false)
+  const [addInput, setAddInput] = useState('')
+  const [addLabel, setAddLabel] = useState('')
+  const [addLoading, setAddLoading] = useState(false)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [testResults, setTestResults] = useState<Record<number, ProxyTestResult & { loading?: boolean }>>({})
+
+  const reload = useCallback(async () => {
+    try {
+      const [proxyRes, settingsRes] = await Promise.all([api.listProxies(), api.getSettings()])
+      setProxies(proxyRes.proxies)
+      setPoolEnabled(settingsRes.proxy_pool_enabled)
+    } catch { /* ignore */ }
+    setLoading(false)
+  }, [])
+
+  useEffect(() => { reload() }, [reload])
+
+  const handleTogglePool = async () => {
+    const next = !poolEnabled
+    setPoolEnabled(next)
+    try {
+      await api.updateSettings({ proxy_pool_enabled: next })
+    } catch {
+      setPoolEnabled(!next)
+    }
+  }
+
+  const handleAdd = async () => {
+    const urls = addInput.split('\n').map(s => s.trim()).filter(Boolean)
+    if (urls.length === 0) return
+    setAddLoading(true)
+    try {
+      await api.addProxies({ urls, label: addLabel })
+      setAddInput('')
+      setAddLabel('')
+      setShowAdd(false)
+      await reload()
+    } catch { /* ignore */ }
+    setAddLoading(false)
+  }
+
+  const handleDelete = async (id: number) => {
+    try {
+      await api.deleteProxy(id)
+      await reload()
+    } catch { /* ignore */ }
+  }
+
+  const handleBatchDelete = async () => {
+    if (selected.size === 0) return
+    try {
+      await api.batchDeleteProxies([...selected])
+      setSelected(new Set())
+      await reload()
+    } catch { /* ignore */ }
+  }
+
+  const handleToggle = async (p: ProxyRow) => {
+    try {
+      await api.updateProxy(p.id, { enabled: !p.enabled })
+      await reload()
+    } catch { /* ignore */ }
+  }
+
+  const handleTest = async (p: ProxyRow) => {
+    setTestResults(prev => ({ ...prev, [p.id]: { success: false, loading: true } }))
+    try {
+      const result = await api.testProxy(p.url)
+      setTestResults(prev => ({ ...prev, [p.id]: result }))
+    } catch (err) {
+      setTestResults(prev => ({ ...prev, [p.id]: { success: false, error: String(err) } }))
+    }
+  }
+
+  const allSelected = proxies.length > 0 && selected.size === proxies.length
+  const toggleSelectAll = () => {
+    if (allSelected) {
+      setSelected(new Set())
+    } else {
+      setSelected(new Set(proxies.map(p => p.id)))
+    }
+  }
+
+  const formatTime = (iso: string) => {
+    const d = new Date(iso)
+    const offset = 8 * 60
+    const beijing = new Date(d.getTime() + (offset + d.getTimezoneOffset()) * 60 * 1000)
+    return `${beijing.getFullYear()}-${String(beijing.getMonth() + 1).padStart(2, '0')}-${String(beijing.getDate()).padStart(2, '0')} ${String(beijing.getHours()).padStart(2, '0')}:${String(beijing.getMinutes()).padStart(2, '0')}`
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h2 className="text-2xl font-bold text-foreground flex items-center gap-2.5">
+            <Globe className="size-6 text-primary" />
+            {t('nav.proxies')}
+          </h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            管理代理池，支持轮询分配给账号使用
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          {/* Pool Toggle */}
+          <button
+            onClick={handleTogglePool}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold border transition-all duration-200 ${
+              poolEnabled
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400'
+                : 'bg-muted/50 border-border text-muted-foreground'
+            }`}
+          >
+            {poolEnabled ? <ToggleRight className="size-5" /> : <ToggleLeft className="size-5" />}
+            {poolEnabled ? '代理池已启用' : '代理池已关闭'}
+          </button>
+
+          {selected.size > 0 && (
+            <button
+              onClick={handleBatchDelete}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold bg-destructive/10 border border-destructive/30 text-destructive hover:bg-destructive/20 transition-all"
+            >
+              <Trash2 className="size-4" />
+              删除 ({selected.size})
+            </button>
+          )}
+
+          <button
+            onClick={() => setShowAdd(!showAdd)}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold bg-primary text-primary-foreground hover:opacity-90 transition-opacity shadow-sm"
+          >
+            <Plus className="size-4" />
+            添加代理
+          </button>
+        </div>
+      </div>
+
+      {/* Add Panel */}
+      {showAdd && (
+        <Card className="py-0">
+          <CardContent className="p-6 space-y-4">
+            <h4 className="text-base font-semibold text-foreground">添加代理</h4>
+            <p className="text-sm text-muted-foreground">
+              每行一个代理 URL，支持 http:// / https:// / socks5:// 格式
+            </p>
+            <textarea
+              value={addInput}
+              onChange={e => setAddInput(e.target.value)}
+              placeholder={"http://user:pass@ip:port\nsocks5://ip:port"}
+              className="w-full h-32 px-3 py-2 text-sm rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground resize-none outline-none focus:ring-2 focus:ring-primary/30 font-mono"
+            />
+            <div className="flex items-center gap-3">
+              <input
+                type="text"
+                value={addLabel}
+                onChange={e => setAddLabel(e.target.value)}
+                placeholder={'标签 (可选, 如 "美国", "日本")'}
+                className="flex-1 px-3 py-2 text-sm rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-primary/30"
+              />
+              <button
+                onClick={handleAdd}
+                disabled={addLoading || !addInput.trim()}
+                className="px-5 py-2 rounded-xl text-sm font-semibold bg-primary text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50 shadow-sm"
+              >
+                {addLoading ? '添加中...' : '确认添加'}
+              </button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Stats */}
+      <div className="grid grid-cols-3 gap-4">
+        <Card className="py-0">
+          <CardContent className="p-4 text-center">
+            <div className="text-2xl font-bold text-foreground">{proxies.length}</div>
+            <div className="text-xs text-muted-foreground mt-1">总代理数</div>
+          </CardContent>
+        </Card>
+        <Card className="py-0">
+          <CardContent className="p-4 text-center">
+            <div className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">{proxies.filter(p => p.enabled).length}</div>
+            <div className="text-xs text-muted-foreground mt-1">已启用</div>
+          </CardContent>
+        </Card>
+        <Card className="py-0">
+          <CardContent className="p-4 text-center">
+            <div className={`text-2xl font-bold ${poolEnabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'}`}>
+              {poolEnabled ? '轮询模式' : '关闭'}
+            </div>
+            <div className="text-xs text-muted-foreground mt-1">代理池状态</div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Table */}
+      <Card className="py-0">
+        <CardContent className="p-0">
+          {loading ? (
+            <div className="flex justify-center items-center py-16">
+              <Loader2 className="size-6 animate-spin text-primary" />
+            </div>
+          ) : proxies.length === 0 ? (
+            <div className="text-center py-16 text-muted-foreground">
+              <Globe className="size-12 mx-auto mb-3 opacity-30" />
+              <p className="text-sm font-medium">暂无代理</p>
+              <p className="text-xs mt-1">点击「添加代理」开始配置代理池</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border text-left text-muted-foreground">
+                    <th className="p-3 w-10">
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={toggleSelectAll}
+                        className="size-4 rounded"
+                      />
+                    </th>
+                    <th className="p-3 font-semibold">代理 URL</th>
+                    <th className="p-3 font-semibold">标签</th>
+                    <th className="p-3 font-semibold">状态</th>
+                    <th className="p-3 font-semibold">添加时间</th>
+                    <th className="p-3 font-semibold">测试结果</th>
+                    <th className="p-3 font-semibold text-right">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {proxies.map(p => {
+                    const tr = testResults[p.id]
+                    return (
+                      <tr key={p.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                        <td className="p-3">
+                          <input
+                            type="checkbox"
+                            checked={selected.has(p.id)}
+                            onChange={() => {
+                              const next = new Set(selected)
+                              if (next.has(p.id)) next.delete(p.id)
+                              else next.add(p.id)
+                              setSelected(next)
+                            }}
+                            className="size-4 rounded"
+                          />
+                        </td>
+                        <td className="p-3 font-mono text-xs break-all max-w-[300px]">{p.url}</td>
+                        <td className="p-3">
+                          {p.label ? (
+                            <span className="inline-flex px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs font-medium">{p.label}</span>
+                          ) : (
+                            <span className="text-muted-foreground text-xs">-</span>
+                          )}
+                        </td>
+                        <td className="p-3">
+                          <button
+                            onClick={() => handleToggle(p)}
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold transition-all ${
+                              p.enabled
+                                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
+                                : 'bg-muted/50 text-muted-foreground border border-border'
+                            }`}
+                          >
+                            <span className={`size-1.5 rounded-full ${p.enabled ? 'bg-emerald-500' : 'bg-muted-foreground/50'}`} />
+                            {p.enabled ? '启用' : '禁用'}
+                          </button>
+                        </td>
+                        <td className="p-3 text-xs text-muted-foreground">{formatTime(p.created_at)}</td>
+                        <td className="p-3">
+                          {tr ? (
+                            tr.loading ? (
+                              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                                <Loader2 className="size-3 animate-spin" /> 测试中...
+                              </span>
+                            ) : tr.success ? (
+                              <div className="space-y-0.5">
+                                <div className="flex items-center gap-1 text-xs font-medium text-foreground">
+                                  <MapPin className="size-3 text-primary" />
+                                  {tr.country}·{tr.region}·{tr.city}
+                                </div>
+                                <div className="text-[11px] text-muted-foreground">
+                                  IP: {tr.ip} | ISP: {tr.isp} | {tr.latency_ms}ms
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-xs text-destructive">{tr.error || '测试失败'}</span>
+                            )
+                          ) : (
+                            <span className="text-xs text-muted-foreground">-</span>
+                          )}
+                        </td>
+                        <td className="p-3">
+                          <div className="flex items-center gap-1.5 justify-end">
+                            <button
+                              onClick={() => handleTest(p)}
+                              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-border text-foreground hover:bg-muted/50 transition-all"
+                              title="测试代理"
+                            >
+                              <TestTube className="size-3.5" />
+                              测试
+                            </button>
+                            <button
+                              onClick={() => handleDelete(p.id)}
+                              className="flex items-center justify-center size-7 rounded-lg text-destructive hover:bg-destructive/10 transition-all"
+                              title="删除"
+                            >
+                              <Trash2 className="size-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}

@@ -211,6 +211,23 @@ func loggerMiddleware() gin.HandlerFunc {
 		start := time.Now()
 		c.Next()
 		latency := time.Since(start)
-		log.Printf("%s %s %d %v", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), latency)
+
+		email, _ := c.Get("x-account-email")
+		proxyURL, _ := c.Get("x-account-proxy")
+
+		emailStr := ""
+		if e, ok := email.(string); ok && e != "" {
+			emailStr = e
+		}
+		proxyStr := "no proxy"
+		if p, ok := proxyURL.(string); ok && p != "" {
+			proxyStr = p
+		}
+
+		if emailStr != "" {
+			log.Printf("%s %s %d %v [%s] [%s]", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), latency, emailStr, proxyStr)
+		} else {
+			log.Printf("%s %s %d %v", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), latency)
+		}
 	}
 }

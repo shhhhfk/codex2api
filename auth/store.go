@@ -639,6 +639,11 @@ type Store struct {
 	autoCleanupBatch      atomic.Bool
 	stopCh                chan struct{}
 	wg                    sync.WaitGroup
+
+	// 代理池
+	proxyPool        []string // 已启用的代理 URL 列表
+	proxyPoolEnabled bool     // 代理池是否开启
+	proxyRoundRobin  uint64   // 轮询计数器
 }
 
 // NewStore 创建账号管理器
@@ -652,17 +657,33 @@ func NewStore(db *database.DB, tc *cache.TokenCache, settings *database.SystemSe
 		}
 	}
 	s := &Store{
-		globalProxy:     settings.ProxyURL,
-		maxConcurrency:  int64(settings.MaxConcurrency),
-		testConcurrency: int64(settings.TestConcurrency),
-		db:              db,
-		tokenCache:      tc,
-		stopCh:          make(chan struct{}),
+		globalProxy:      settings.ProxyURL,
+		maxConcurrency:   int64(settings.MaxConcurrency),
+		testConcurrency:  int64(settings.TestConcurrency),
+		db:               db,
+		tokenCache:       tc,
+		stopCh:           make(chan struct{}),
+		proxyPoolEnabled: settings.ProxyPoolEnabled,
 	}
 	s.testModel.Store(settings.TestModel)
 	s.autoCleanUnauthorized.Store(settings.AutoCleanUnauthorized)
 	s.autoCleanRateLimited.Store(settings.AutoCleanRateLimited)
 	s.autoCleanFullUsage.Store(settings.AutoCleanFullUsage)
+
+	// 加载代理池
+	if settings.ProxyPoolEnabled {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if proxies, err := db.ListEnabledProxies(ctx); err == nil {
+			urls := make([]string, 0, len(proxies))
+			for _, p := range proxies {
+				urls = append(urls, p.URL)
+			}
+			s.proxyPool = urls
+			log.Printf("代理池已加载: %d 个活跃代理", len(urls))
+		}
+	}
+
 	return s
 }
 
@@ -678,6 +699,53 @@ func (s *Store) SetProxyURL(url string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.globalProxy = url
+}
+
+// NextProxy 轮询获取下一个代理 URL
+func (s *Store) NextProxy() string {
+	s.mu.RLock()
+	enabled := s.proxyPoolEnabled
+	pool := s.proxyPool
+	s.mu.RUnlock()
+
+	if !enabled || len(pool) == 0 {
+		return s.GetProxyURL() // fallback 全局单代理
+	}
+	idx := atomic.AddUint64(&s.proxyRoundRobin, 1)
+	return pool[idx%uint64(len(pool))]
+}
+
+// GetProxyPoolEnabled 获取代理池开关状态
+func (s *Store) GetProxyPoolEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.proxyPoolEnabled
+}
+
+// SetProxyPoolEnabled 设置代理池开关
+func (s *Store) SetProxyPoolEnabled(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.proxyPoolEnabled = enabled
+}
+
+// ReloadProxyPool 从数据库重新加载代理池
+func (s *Store) ReloadProxyPool() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	proxies, err := s.db.ListEnabledProxies(ctx)
+	if err != nil {
+		return err
+	}
+	urls := make([]string, 0, len(proxies))
+	for _, p := range proxies {
+		urls = append(urls, p.URL)
+	}
+	s.mu.Lock()
+	s.proxyPool = urls
+	s.mu.Unlock()
+	log.Printf("代理池已重新加载: %d 个活跃代理", len(urls))
+	return nil
 }
 
 // GetAutoCleanUnauthorized 获取是否自动清理 401 账号

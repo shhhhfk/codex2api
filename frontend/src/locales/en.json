@@ -6,7 +6,8 @@
     "scheduler": "Scheduler",
     "usage": "Usage",
     "settings": "Settings",
-    "console": "Console"
+    "console": "Console",
+    "proxies": "Proxies"
   },
   "common": {
     "online": "Online",
